@@ -508,16 +508,17 @@ class AnsibleMixin(object):
 
         return obj
 
-    def __transform_properties(self, properties, prefix='', path=None, alternate_prefix=''):
+    def __transform_properties(self, properties, prefix='', path=None, alternate_prefix='', parent_property_classes=None):
         """
         Convert a list of properties to an argument_spec dictionary
 
-        :param properties: List of properties from self.properties_from_model_obj()
+        :param properties: List of properties from self.properties_from_model_class()
         :param prefix: String to prefix to argument names.
         :param path: List of property names providing the recursive path through the model to the property
         :param alternate_prefix: a more minimal version of prefix
         :return: dict
         """
+        parent_property_classes = parent_property_classes or set()
         primitive_types = list(PRIMITIVES) + ['list', 'dict']
         args = {}
 
@@ -526,17 +527,17 @@ class AnsibleMixin(object):
 
         def add_meta(prop_name, prop_prefix, prop_alt_prefix):
             """ Adds metadata properties to the argspec """
-            # if prop_alt_prefix != prop_prefix:
-            #     if prop_alt_prefix:
-            #         args[prop_prefix + prop_name]['aliases'] = [prop_alt_prefix + prop_name]
-            #     elif prop_prefix:
-            #         args[prop_prefix + prop_name]['aliases'] = [prop_name]
+            if prop_alt_prefix != prop_prefix:
+                if prop_alt_prefix:
+                    args[prop_prefix + prop_name]['aliases'] = [prop_alt_prefix + prop_name]
+                elif prop_prefix:
+                    args[prop_prefix + prop_name]['aliases'] = [prop_name]
             prop_paths = copy.copy(path)  # copy path from outer scope
             prop_paths.append('metadata')
             prop_paths.append(prop_name)
             args[prop_prefix + prop_name]['property_path'] = prop_paths
 
-        for raw_prop, prop_attributes in iteritems(properties):
+        for raw_prop, prop_attributes in properties.items():
             prop = PYTHON_KEYWORD_MAPPING.get(raw_prop, raw_prop)
             if prop in ('api_version', 'status', 'kind', 'items') and not prefix:
                 # Don't expose these properties
@@ -545,7 +546,12 @@ class AnsibleMixin(object):
                 # Property cannot be set by the user
                 continue
             elif prop == 'metadata' and prop_attributes['class'].__name__ == 'UnversionedListMeta':
-                args['namespace'] = {}
+                args['namespace'] = {
+                    'description': [
+                        'Namespaces provide a scope for names. Names of resources need to be unique within a '
+                        'namespace, but not across namespaces. Provide the namespace for the object.'
+                    ]
+                }
             elif prop == 'metadata' and prop_attributes['class'].__name__ != 'UnversionedListMeta':
                 meta_prefix = prefix + '_metadata_' if prefix else ''
                 meta_alt_prefix = alternate_prefix + '_metadata_' if alternate_prefix else ''
@@ -568,6 +574,12 @@ class AnsibleMixin(object):
                     args[meta_prefix + 'name'] = {}
                     add_meta('name', meta_prefix, meta_alt_prefix)
             elif prop_attributes['class'].__name__ not in primitive_types and not prop.endswith('params'):
+                # prevents infinite recursion
+                if prop_attributes['class'] in parent_property_classes:
+                    return args
+                else:
+                    property_classes = parent_property_classes.copy()
+                    property_classes.add(prop_attributes['class'])
                 # Adds nested properties recursively
 
                 label = prop
@@ -584,22 +596,22 @@ class AnsibleMixin(object):
                 paths = copy.copy(path)
                 paths.append(prop)
 
-                # if alternate_prefix:
-                #     # Prevent the last prefix from repeating. In other words, avoid things like 'pod_pod'
-                #     pieces = alternate_prefix.split('_')
-                #     alternate_label = alternate_label.replace(pieces[len(pieces) - 1] + '_', '', 1)
-                # if alternate_label != self.base_model_name and alternate_label not in a:
-                #     a += '_' + alternate_label if a else alternate_label
+                if alternate_prefix:
+                    # Prevent the last prefix from repeating. In other words, avoid things like 'pod_pod'
+                    pieces = alternate_prefix.split('_')
+                    alternate_label = alternate_label.replace(pieces[len(pieces) - 1] + '_', '', 1)
+                if alternate_label != self.base_model_name and alternate_label not in a:
+                    a += '_' + alternate_label if a else alternate_label
                 if prop.endswith('params') and 'type' in properties:
                     sub_props = dict()
                     sub_props[prop] = {
                         'class': dict,
                         'immutable': False
                     }
-                    args.update(self.__transform_properties(sub_props, prefix=p, path=paths, alternate_prefix=a))
+                    args.update(self.__transform_properties(sub_props, prefix=p, path=paths, alternate_prefix=a, parent_property_classes=property_classes))
                 else:
-                    sub_props = self.properties_from_model_obj(prop_attributes['class']())
-                    args.update(self.__transform_properties(sub_props, prefix=p, path=paths, alternate_prefix=a))
+                    sub_props = self.properties_from_model_class(prop_attributes['class'])
+                    args.update(self.__transform_properties(sub_props, prefix=p, path=paths, alternate_prefix=a, parent_property_classes=property_classes))
             else:
                 # Adds a primitive property
                 arg_prefix = prefix + '_' if prefix else ''
@@ -608,7 +620,7 @@ class AnsibleMixin(object):
                 paths.append(prop)
 
                 property_type = prop_attributes['class'].__name__
-                if property_type == 'IntstrIntOrString':
+                if property_type == 'object':
                     property_type = 'str'
 
                 args[arg_prefix + prop] = {
